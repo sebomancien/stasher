@@ -1,0 +1,66 @@
+services:
+
+  # ── stasher ────────────────────────────────────────────────────────────
+  # Mounts the Docker socket (read-only) and a named volume for storing
+  # archives. No host-path assumptions are needed.
+  stasher:
+    image: stasher:latest
+    build:
+      context: ..
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - backups:/backups
+    environment:
+      BACKUP_DEST: /backups
+      CHECK_INTERVAL: "60s"    # how often to poll Docker for new/removed containers
+      LOG_LEVEL: debug
+      TZ: "America/Montreal"   # set to your local timezone (e.g. Europe/Paris, America/New_York)
+    restart: unless-stopped
+
+  # ── postgres (example workload) ──────────────────────────────────────────
+  # Each volume is declared under a unique <id> with its own schedule and
+  # retention. Multiple volumes per container are supported.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: mydb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    labels:
+      stasher.enabled: "true"
+      # Back up the data directory daily, keep 14 days
+      stasher.volumes.data.path: "/var/lib/postgresql/data"
+      stasher.volumes.data.schedule: "0 2 * * *"   # 02:00 every day
+      stasher.volumes.data.retention: "336h"
+      # archive name: postgres-data-<timestamp>.tar.gz
+
+  # ── redis — stop for RDB consistency ─────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    labels:
+      stasher.enabled: "true"
+      stasher.options.stop_during_backup: "true"   # stop for RDB consistency
+      stasher.volumes.data.path: "/data"
+      stasher.volumes.data.schedule: "@hourly"
+      stasher.volumes.data.retention: "24h"
+      # archive name: redis-data-<timestamp>.tar.gz
+
+  # ── app with multiple volumes ─────────────────────────────────────────────
+  # app:
+  #   image: myapp:latest
+  #   labels:
+  #     stasher.enabled: "true"
+  #     stasher.volumes.db.path: "/var/lib/postgresql/data"
+  #     stasher.volumes.db.schedule: "0 3 * * *"
+  #     stasher.volumes.db.retention: "720h"
+  #     stasher.volumes.uploads.path: "/app/uploads"
+  #     stasher.volumes.uploads.schedule: "0 */6 * * *"
+  #     stasher.volumes.uploads.retention: "168h"
+
+volumes:
+  postgres_data:
+  redis_data:
+  backups:
