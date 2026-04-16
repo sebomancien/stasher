@@ -5,11 +5,12 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"stasher/internal/config"
 	"syscall"
 )
 
 func main() {
-	cfg := loadConfig()
+	cfg := config.Load()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: cfg.LogLevel,
 	})))

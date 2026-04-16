@@ -14,7 +14,8 @@ import (
 	"time"
 
 	"stasher/internal/label"
-	"stasher/pkg/labels"
+	"stasher/pkg/docker"
+	"stasher/pkg/retention"
 )
 
 // Manifest is written as the first entry ("stasher-manifest.json") of every archive.
@@ -25,17 +26,17 @@ type Manifest struct {
 	Path          string    `json:"path"`
 }
 
-// backupContainerVolume backs up a single configured volume for the given container.
+// Backs up a single configured volume for the given container.
 // It re-inspects the container at call time to pick up any label changes since registration.
-func (m *Manager) backupContainerVolume(ctx context.Context, containerID, volID string) error {
-	info, err := m.docker.ContainerInspect(ctx, containerID)
+func (m *Manager) backupContainerVolume(ctx context.Context, container docker.Container, volID string) error {
+	info, err := container.Inspect(ctx)
 	if err != nil {
 		return fmt.Errorf("inspect: %w", err)
 	}
 
-	var cb label.Container
-	if err := labels.Parse(info.Config.Labels, &cb, label.ROOT); err != nil {
-		return fmt.Errorf("parse labels: %w", err)
+	cb, err := label.Unmarshal(info.Config.Labels)
+	if err != nil {
+		return fmt.Errorf("unmarshal labels: %w", err)
 	}
 
 	vol, ok := cb.Volumes[volID]
@@ -47,92 +48,98 @@ func (m *Manager) backupContainerVolume(ctx context.Context, containerID, volID 
 
 	if cb.Options.StopDuringBackup && info.State.Running {
 		slog.Info("stopping container for backup", "container", containerName)
-		if err := m.docker.ContainerStop(ctx, containerID, 30); err != nil {
+		err := container.Stop(ctx, 30*time.Second)
+		if err != nil {
 			return fmt.Errorf("stop: %w", err)
 		}
 		defer func() {
 			slog.Info("restarting container", "container", containerName)
-			if err := m.docker.ContainerStart(ctx, containerID); err != nil {
+			err := container.Start(ctx)
+			if err != nil {
 				slog.Error("restart failed", "container", containerName, "err", err)
 			}
 		}()
 	}
 
-	return m.backupVolume(ctx, containerID, containerName, volID, vol)
+	return m.backupVolume(ctx, container, containerName, volID, vol)
 }
 
-// backupVolume writes one archive for the given volume configuration.
-func (m *Manager) backupVolume(ctx context.Context, containerID, containerName, volID string, vol label.Volume) error {
+// Writes one archive for the given volume configuration.
+func (m *Manager) backupVolume(ctx context.Context, container docker.Container, containerName, volID string, vol label.Volume) error {
 	archiveName := containerName + "-" + volID
 
 	timestamp := time.Now().UTC().Format("20060102-150405")
 	filename := fmt.Sprintf("%s-%s.tar.gz", archiveName, timestamp)
-	outPath := filepath.Join(m.cfg.BackupDest, filename)
+	outPath := filepath.Join(m.config.BackupDest, filename)
 
 	slog.Info("writing backup", "container", containerName, "file", filename)
-	if err := m.writeArchive(ctx, containerID, outPath, containerName, vol.Path); err != nil {
+	err := m.writeArchive(ctx, container, outPath, containerName, vol.Path)
+	if err != nil {
 		os.Remove(outPath)
 		return fmt.Errorf("write archive: %w", err)
 	}
 
 	slog.Info("stasher complete", "container", containerName, "file", filename)
-	m.applyRetention(archiveName, vol.Retention)
+	m.applyRetention(archiveName, vol.Keep)
 	return nil
 }
 
-// writeArchive creates the .tar.gz archive at outPath for the given container path.
-func (m *Manager) writeArchive(ctx context.Context, containerID, outPath, containerName, path string) (rerr error) {
+// Creates the .tar.gz archive at outPath for the given container path.
+func (m *Manager) writeArchive(ctx context.Context, container docker.Container, outPath, containerName, path string) (rerr error) {
 	f, err := os.Create(outPath)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if err := f.Close(); err != nil && rerr == nil {
+		err := f.Close()
+		if err != nil && rerr == nil {
 			rerr = err
 		}
 	}()
 
 	gz := gzip.NewWriter(f)
 	defer func() {
-		if err := gz.Close(); err != nil && rerr == nil {
+		err := gz.Close()
+		if err != nil && rerr == nil {
 			rerr = err
 		}
 	}()
 
 	tw := tar.NewWriter(gz)
 	defer func() {
-		if err := tw.Close(); err != nil && rerr == nil {
+		err := tw.Close()
+		if err != nil && rerr == nil {
 			rerr = err
 		}
 	}()
 
-	// Write manifest as the first entry so it can be inspected without
-	// extracting the whole archive
+	// Write manifest as the first entry so it can be inspected without extracting the whole archive
 	manifest := Manifest{
-		ContainerID:   containerID[:12],
+		ContainerID:   container.Id[:12],
 		ContainerName: containerName,
 		Timestamp:     time.Now().UTC(),
 		Path:          path,
 	}
-	if err := writeManifest(tw, manifest); err != nil {
+	err = writeManifest(tw, manifest)
+	if err != nil {
 		return fmt.Errorf("manifest: %w", err)
 	}
 
-	rc, err := m.docker.CopyFromContainer(ctx, containerID, path)
+	rc, err := container.CopyFrom(ctx, path)
 	if err != nil {
 		return fmt.Errorf("copy %s: %w", path, err)
 	}
 	defer rc.Close()
 
-	if err := repackTar(tw, rc, path); err != nil {
+	err = repackTar(tw, rc, path)
+	if err != nil {
 		return fmt.Errorf("repack %s: %w", path, err)
 	}
 
 	return nil
 }
 
-// repackTar reads a tar stream from CopyFromContainer and rewrites each
-// header name so files appear at their full container path
+// Reads a tar stream and rewrites each header name so files appear at their full container path.
 //
 // Docker's CopyFromContainer returns a tar where the root is named after the
 // last path component of srcPath:
@@ -162,7 +169,8 @@ func repackTar(tw *tar.Writer, r io.Reader, srcPath string) error {
 			hdr.Linkname = rewritePath(hdr.Linkname, base, prefix)
 		}
 
-		if err := tw.WriteHeader(hdr); err != nil {
+		err = tw.WriteHeader(hdr)
+		if err != nil {
 			return err
 		}
 		// Copy file data, symlinks, hard links, and directories have no body
@@ -170,15 +178,16 @@ func repackTar(tw *tar.Writer, r io.Reader, srcPath string) error {
 			hdr.Typeflag != tar.TypeLink &&
 			hdr.Typeflag != tar.TypeDir &&
 			hdr.Size > 0 {
-			if _, err := io.Copy(tw, tr); err != nil {
+			_, err := io.Copy(tw, tr)
+			if err != nil {
 				return err
 			}
 		}
 	}
 }
 
-// rewritePath renames a tar entry from the Docker-relative form ("data/file")
-// to the full container path form ("var/lib/postgresql/data/file")
+// Renames a tar entry from the Docker-relative form ("data/file")
+// to the full container path form ("var/lib/postgresql/data/file").
 func rewritePath(name, base, prefix string) string {
 	switch {
 	case name == base:
@@ -190,6 +199,7 @@ func rewritePath(name, base, prefix string) string {
 	}
 }
 
+// Writes a file named "stasher-manifest.json" into a tar archive header.
 func writeManifest(tw *tar.Writer, m Manifest) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -201,35 +211,37 @@ func writeManifest(tw *tar.Writer, m Manifest) error {
 		Mode:    0644,
 		ModTime: time.Now(),
 	}
-	if err := tw.WriteHeader(hdr); err != nil {
+	err = tw.WriteHeader(hdr)
+	if err != nil {
 		return err
 	}
 	_, err = tw.Write(data)
 	return err
 }
 
-// applyRetention removes archives for archiveName that are older than retention.
-// If retention is zero, archives are kept forever.
-func (m *Manager) applyRetention(archiveName string, retention time.Duration) {
-	if retention == 0 {
-		return
-	}
-	pattern := filepath.Join(m.cfg.BackupDest, archiveName+"-*.tar.gz")
+// Applies the keep policy for archiveName by deleting archives not covered by any active period.
+// If the policy is empty or all values are 0, nothing is deleted.
+func (m *Manager) applyRetention(archiveName string, policy label.KeepPolicy) {
+	pattern := filepath.Join(m.config.BackupDest, archiveName+"-*.tar.gz")
 	files, err := filepath.Glob(pattern)
 	if err != nil || len(files) == 0 {
 		return
 	}
-	cutoff := time.Now().Add(-retention)
+
+	var archives []retention.Archive
 	for _, f := range files {
-		info, err := os.Stat(f)
-		if err != nil {
+		t, ok := retention.ParseArchiveTime(filepath.Base(f), archiveName)
+		if !ok {
 			continue
 		}
-		if info.ModTime().Before(cutoff) {
-			slog.Info("removing old backup", "file", filepath.Base(f))
-			if err := os.Remove(f); err != nil {
-				slog.Warn("remove failed", "file", f, "err", err)
-			}
+		archives = append(archives, retention.Archive{Name: f, Time: t})
+	}
+
+	for _, f := range retention.Apply(archives, policy) {
+		slog.Info("removing old backup", "file", filepath.Base(f))
+		err := os.Remove(f)
+		if err != nil {
+			slog.Warn("remove failed", "file", f, "err", err)
 		}
 	}
 }

@@ -32,7 +32,7 @@ services:
       # Back up the data directory daily, keep 14 days
       stasher.volumes.data.path: "/var/lib/postgresql/data"
       stasher.volumes.data.schedule: "0 2 * * *"   # 02:00 every day
-      stasher.volumes.data.retention: "336h"
+      stasher.volumes.data.keep.days: 14
       # archive name: postgres-data-<timestamp>.tar.gz
 
   # ── redis — stop for RDB consistency ─────────────────────────────────────
@@ -45,7 +45,7 @@ services:
       stasher.options.stop_during_backup: "true"   # stop for RDB consistency
       stasher.volumes.data.path: "/data"
       stasher.volumes.data.schedule: "@hourly"
-      stasher.volumes.data.retention: "24h"
+      stasher.volumes.data.keep.days: 1
       # archive name: redis-data-<timestamp>.tar.gz
 
   # ── app with multiple volumes ─────────────────────────────────────────────

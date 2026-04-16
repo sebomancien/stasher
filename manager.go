@@ -8,10 +8,11 @@ import (
 	"sync"
 	"time"
 
+	"stasher/internal/config"
 	"stasher/internal/label"
 	"stasher/internal/scheduler"
 	"stasher/pkg/cron"
-	"stasher/pkg/labels"
+	"stasher/pkg/docker"
 )
 
 // labelEnabled is the Docker label filter used to discover opt-in containers.
@@ -19,20 +20,20 @@ const labelEnabled = "stasher.enabled"
 
 // Manager watches Docker for containers with backup labels and schedules backups
 type Manager struct {
-	docker *dockerClient
-	cfg    Config
+	docker *docker.Client
+	config *config.Config
 	jobs   map[string]map[string]*scheduler.Job // containerID → volID → job
 	mu     sync.Mutex
 }
 
-func newManager(cfg Config) (*Manager, error) {
-	cli, err := newDockerClient()
+func newManager(config *config.Config) (*Manager, error) {
+	cli, err := docker.NewClient()
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
 	return &Manager{
 		docker: cli,
-		cfg:    cfg,
+		config: config,
 		jobs:   make(map[string]map[string]*scheduler.Job),
 	}, nil
 }
@@ -43,7 +44,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	// Initial sync so backups are registered before the first tick
 	m.sync(ctx)
 
-	ticker := time.NewTicker(m.cfg.CheckInterval)
+	ticker := time.NewTicker(m.config.CheckInterval)
 	defer ticker.Stop()
 
 	for {
@@ -58,7 +59,7 @@ func (m *Manager) Run(ctx context.Context) error {
 
 // sync reconciles the set of running jobs with the current labeled containers.
 func (m *Manager) sync(ctx context.Context) {
-	containers, err := m.docker.ContainerList(ctx, labelEnabled+"=true")
+	containers, err := m.docker.ListContainers(ctx, labelEnabled+"=true")
 	if err != nil {
 		slog.Error("container list", "err", err)
 		return
@@ -75,16 +76,15 @@ func (m *Manager) sync(ctx context.Context) {
 
 	active := make(map[string]struct{}, len(containers))
 	for _, c := range containers {
-		active[c.ID] = struct{}{}
+		active[c.Id] = struct{}{}
 
-		var cb label.Container
-		err := labels.Parse(c.Labels, &cb, label.ROOT)
+		cb, err := label.Unmarshal(c.Labels)
 		if err != nil {
-			slog.Info("parse labels", "container", displayName(c.Names), "err", err)
+			slog.Info("unmarshal labels", "container", displayName(c.Names), "err", err)
 			continue
 		}
 
-		m.reconcileVolumes(c.ID, displayName(c.Names), cb)
+		m.reconcileVolumes(c, displayName(c.Names), cb)
 	}
 
 	// Unregister all jobs for containers that are gone
@@ -102,9 +102,9 @@ func (m *Manager) sync(ctx context.Context) {
 
 // reconcileVolumes registers, updates, or removes jobs so they match
 // the volume configuration declared in cb.
-func (m *Manager) reconcileVolumes(containerID, name string, cb label.Container) {
-	if m.jobs[containerID] == nil {
-		m.jobs[containerID] = make(map[string]*scheduler.Job)
+func (m *Manager) reconcileVolumes(container docker.Container, name string, cb *label.Container) {
+	if m.jobs[container.Id] == nil {
+		m.jobs[container.Id] = make(map[string]*scheduler.Job)
 	}
 
 	active := make(map[string]struct{}, len(cb.Volumes))
@@ -118,7 +118,7 @@ func (m *Manager) reconcileVolumes(containerID, name string, cb label.Container)
 		}
 
 		// Skip if already registered with the same schedule
-		j, ok := m.jobs[containerID][volID]
+		j, ok := m.jobs[container.Id][volID]
 		if ok {
 			if j.Schedule().Equal(schedule) {
 				continue
@@ -127,9 +127,9 @@ func (m *Manager) reconcileVolumes(containerID, name string, cb label.Container)
 		}
 
 		// Capture loop variables before the closure
-		cID, vID, cName := containerID, volID, name
+		vID, cName := volID, name
 		j, err = scheduler.NewJob(schedule, func() {
-			err := m.backupContainerVolume(context.Background(), cID, vID)
+			err := m.backupContainerVolume(context.Background(), container, vID)
 			if err != nil {
 				slog.Error("stasher error", "container", cName, "volume", vID, "err", err)
 			}
@@ -139,29 +139,26 @@ func (m *Manager) reconcileVolumes(containerID, name string, cb label.Container)
 			continue
 		}
 
-		m.jobs[containerID][volID] = j
+		m.jobs[container.Id][volID] = j
 
 		archiveName := name + "-" + volID
-		ret := "forever"
-		if vol.Retention > 0 {
-			ret = vol.Retention.String()
-		}
 		slog.Info("volume registered",
 			"container", name,
 			"volume", volID,
 			"path", vol.Path,
 			"archive", archiveName,
 			"schedule", vol.Schedule,
-			"retention", ret,
+			"keep", fmt.Sprintf("days=%d weeks=%d months=%d years=%d", vol.Keep[label.Days], vol.Keep[label.Weeks], vol.Keep[label.Months], vol.Keep[label.Years]),
 			"next", j.Next().Format(time.RFC3339),
 		)
 	}
 
 	// Unregister jobs for volumes that are no longer configured
-	for volID, j := range m.jobs[containerID] {
-		if _, ok := active[volID]; !ok {
+	for volID, j := range m.jobs[container.Id] {
+		_, ok := active[volID]
+		if !ok {
 			j.Stop()
-			delete(m.jobs[containerID], volID)
+			delete(m.jobs[container.Id], volID)
 			slog.Info("volume unregistered", "container", name, "volume", volID)
 		}
 	}

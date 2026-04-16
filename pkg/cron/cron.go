@@ -154,7 +154,8 @@ func parseField(values []bool, s string, min, max int) error {
 // parseRange parses a single cron range element: *, n, n-m, */step, n/step, n-m/step.
 func parseRange(s string, min, max int) ([]int, error) {
 	step := 1
-	if idx := strings.Index(s, "/"); idx >= 0 {
+	idx := strings.Index(s, "/")
+	if idx >= 0 {
 		var err error
 		step, err = strconv.Atoi(s[idx+1:])
 		if err != nil || step <= 0 {

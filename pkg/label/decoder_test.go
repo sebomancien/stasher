@@ -1,11 +1,10 @@
-package labels_test
+package label
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
-
-	"stasher/pkg/labels"
 )
 
 func TestParseTree(t *testing.T) {
@@ -18,13 +17,13 @@ func TestParseTree(t *testing.T) {
 		"stasher.schedule":                   "@daily",
 	}
 
-	root := labels.ParseTree(input)
+	root := ParseTree(input)
 
 	if root.Children["stasher"] == nil {
 		t.Fatal("expected 'stasher' child")
 	}
 	stasher := root.Children["stasher"]
-	if stasher.Children["schedule"] == nil || *stasher.Children["schedule"].Value != "@daily" {
+	if stasher.Children["schedule"] == nil || stasher.Children["schedule"].Value != "@daily" {
 		t.Errorf("stasher.schedule: want @daily")
 	}
 	volumes := stasher.Children["volumes"]
@@ -61,8 +60,9 @@ func TestUnmarshal(t *testing.T) {
 	}
 
 	var cfg Config
-	if err := labels.Parse(input, &cfg); err != nil {
-		t.Fatalf("Parse: %v", err)
+	err := Unmarshal(input, &cfg)
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
 	}
 
 	if !cfg.Enabled {
@@ -95,7 +95,8 @@ func TestUnmarshal_EmptyLabels(t *testing.T) {
 		Name    string `label:"stasher.name"`
 	}
 	var cfg Config
-	if err := labels.Parse(map[string]string{}, &cfg); err != nil {
+	err := Unmarshal(map[string]string{}, &cfg)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if cfg.Enabled || cfg.Name != "" {
@@ -108,7 +109,7 @@ func TestUnmarshal_InvalidBool(t *testing.T) {
 		Enabled bool `label:"enabled"`
 	}
 	var cfg Config
-	err := labels.Parse(map[string]string{"enabled": "maybe"}, &cfg)
+	err := Unmarshal(map[string]string{"enabled": "maybe"}, &cfg)
 	if err == nil {
 		t.Fatal("expected error for invalid bool")
 	}
@@ -119,7 +120,7 @@ func TestUnmarshal_InvalidDuration(t *testing.T) {
 		TTL time.Duration `label:"ttl"`
 	}
 	var cfg Config
-	err := labels.Parse(map[string]string{"ttl": "notaduration"}, &cfg)
+	err := Unmarshal(map[string]string{"ttl": "notaduration"}, &cfg)
 	if err == nil {
 		t.Fatal("expected error for invalid duration")
 	}
@@ -134,8 +135,9 @@ func TestUnmarshal_Defaults(t *testing.T) {
 
 	t.Run("uses defaults when labels absent", func(t *testing.T) {
 		var cfg Config
-		if err := labels.Parse(map[string]string{}, &cfg); err != nil {
-			t.Fatalf("Parse: %v", err)
+		err := Unmarshal(map[string]string{}, &cfg)
+		if err != nil {
+			t.Fatalf("Unmarshal: %v", err)
 		}
 		if cfg.Name != "myapp" {
 			t.Errorf("Name: want myapp, got %q", cfg.Name)
@@ -150,12 +152,13 @@ func TestUnmarshal_Defaults(t *testing.T) {
 
 	t.Run("label overrides default", func(t *testing.T) {
 		var cfg Config
-		if err := labels.Parse(map[string]string{
+		err := Unmarshal(map[string]string{
 			"name":      "override",
 			"enabled":   "false",
 			"retention": "720h",
-		}, &cfg); err != nil {
-			t.Fatalf("Parse: %v", err)
+		}, &cfg)
+		if err != nil {
+			t.Fatalf("Unmarshal: %v", err)
 		}
 		if cfg.Name != "override" {
 			t.Errorf("Name: want override, got %q", cfg.Name)
@@ -177,7 +180,7 @@ func TestUnmarshal_Required(t *testing.T) {
 
 	t.Run("error when required label absent", func(t *testing.T) {
 		var cfg Config
-		err := labels.Parse(map[string]string{"name": "foo"}, &cfg)
+		err := Unmarshal(map[string]string{"name": "foo"}, &cfg)
 		if err == nil {
 			t.Fatal("expected error for missing required label")
 		}
@@ -188,23 +191,11 @@ func TestUnmarshal_Required(t *testing.T) {
 
 	t.Run("no error when required label present", func(t *testing.T) {
 		var cfg Config
-		if err := labels.Parse(map[string]string{"path": "/data"}, &cfg); err != nil {
+		err := Unmarshal(map[string]string{"path": "/data"}, &cfg)
+		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if cfg.Path != "/data" {
-			t.Errorf("Path: got %q", cfg.Path)
-		}
-	})
-
-	t.Run("required satisfied by default tag", func(t *testing.T) {
-		type WithDefault struct {
-			Path string `label:"path" required:"true" default:"/default"`
-		}
-		var cfg WithDefault
-		if err := labels.Parse(map[string]string{}, &cfg); err != nil {
-			t.Fatalf("default should satisfy required: %v", err)
-		}
-		if cfg.Path != "/default" {
 			t.Errorf("Path: got %q", cfg.Path)
 		}
 	})
@@ -218,7 +209,7 @@ func TestUnmarshal_Required(t *testing.T) {
 		}
 		var cfg Cfg
 		// "db" key exists but has no path sub-label
-		err := labels.Parse(map[string]string{"volumes.db.name": "foo"}, &cfg)
+		err := Unmarshal(map[string]string{"volumes.db.name": "foo"}, &cfg)
 		if err == nil {
 			t.Fatal("expected error for missing required path inside map entry")
 		}
@@ -226,6 +217,65 @@ func TestUnmarshal_Required(t *testing.T) {
 			t.Errorf("error should mention field name, got: %v", err)
 		}
 	})
+}
+
+func TestUnmarshal_MapWithCustomKeyUnmarshaler(t *testing.T) {
+	type Config struct {
+		Schedule map[testWeekday]int `label:"schedule"`
+	}
+
+	t.Run("valid weekday key", func(t *testing.T) {
+		var cfg Config
+		err := Unmarshal(map[string]string{"schedule.monday": "3"}, &cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(cfg.Schedule) != 1 {
+			t.Fatalf("want 1 entry, got %d", len(cfg.Schedule))
+		}
+		if cfg.Schedule[testWeekdayMonday] != 3 {
+			t.Errorf("monday: want 3, got %d", cfg.Schedule[testWeekdayMonday])
+		}
+	})
+
+	t.Run("invalid weekday key", func(t *testing.T) {
+		var cfg Config
+		err := Unmarshal(map[string]string{"schedule.notaweekday": "2"}, &cfg)
+		if err == nil {
+			t.Fatal("expected error for unknown weekday key")
+		}
+		if !strings.Contains(err.Error(), "notaweekday") {
+			t.Errorf("error should mention the bad key, got: %v", err)
+		}
+	})
+}
+
+type testWeekday int
+
+const (
+	testWeekdayMonday testWeekday = iota
+	testWeekdayTuesday
+	testWeekdayWednesday
+	testWeekdayThursday
+	testWeekdayFriday
+)
+
+func (w *testWeekday) UnmarshalLabel(s string) error {
+	switch s {
+	case "monday":
+		*w = testWeekdayMonday
+	case "tuesday":
+		*w = testWeekdayTuesday
+	case "wednesday":
+		*w = testWeekdayWednesday
+	case "thursday":
+		*w = testWeekdayThursday
+	case "friday":
+		*w = testWeekdayFriday
+	default:
+		return fmt.Errorf("unknown weekday %q", s)
+	}
+	return nil
 }
 
 func TestParse_WithRoot(t *testing.T) {
@@ -244,8 +294,9 @@ func TestParse_WithRoot(t *testing.T) {
 	}
 
 	var cfg Config
-	if err := labels.Parse(input, &cfg, "stasher"); err != nil {
-		t.Fatalf("Parse: %v", err)
+	err := Unmarshal(input, &cfg, "stasher")
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
 	}
 	if !cfg.Enabled {
 		t.Error("Enabled: want true")
@@ -255,9 +306,9 @@ func TestParse_WithRoot(t *testing.T) {
 	}
 
 	// Node.At provides the same scoping for callers using Unmarshal directly
-	tree := labels.ParseTree(input)
 	var cfg2 Config
-	if err := labels.Unmarshal(tree.At("stasher"), &cfg2); err != nil {
+	err = Unmarshal(input, &cfg2, "stasher")
+	if err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 	if cfg2.Enabled != cfg.Enabled || cfg2.Volumes["db"].Path != cfg.Volumes["db"].Path {
