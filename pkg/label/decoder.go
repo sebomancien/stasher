@@ -72,10 +72,7 @@ func (n *Node) unmarshalStruct(sv reflect.Value) error {
 			if required {
 				return fmt.Errorf("%s: required label not set", tag)
 			} else if defaultVal != "" {
-				node = &Node{
-					Value:    defaultVal,
-					Children: make(map[string]*Node),
-				}
+				node = n.insert(defaultVal, path...)
 			} else {
 				continue
 			}

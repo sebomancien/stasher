@@ -26,7 +26,7 @@ func ParseTree(labels map[string]string) *Node {
 
 // Inserts a nodes along a path.
 // All nodes in the path will be created.
-func (n *Node) insert(value string, path ...string) {
+func (n *Node) insert(value string, path ...string) *Node {
 	for _, p := range path {
 		child, ok := n.Children[p]
 		if !ok {
@@ -38,6 +38,7 @@ func (n *Node) insert(value string, path ...string) {
 		n = child
 	}
 	n.Value = value
+	return n
 }
 
 // At navigates to the node at the path and returns it.
