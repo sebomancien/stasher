@@ -14,6 +14,25 @@ At backup time, data is read through the **Docker `CopyFromContainer` API**. Thi
 
 Each volume produces its own `.tar.gz` archive. Files are stored at their original in-container paths (`var/lib/postgresql/data/…`) so they can be restored with a plain `tar x`. A `stasher-manifest.json` is written as the first entry in every archive for easy inspection.
 
+## Web dashboard
+
+stasher ships a built-in read-only dashboard at `http://localhost:8080` (configurable via `WEB_ADDR`). It lists every discovered container alongside its decoded backup configuration and the time of the next scheduled run. The page refreshes automatically every 30 seconds.
+
+To expose the port in Docker Compose:
+
+```yaml
+services:
+  stasher:
+    image: stasher:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - backups:/backups
+```
+
+Set `WEB_ADDR: ""` to disable the dashboard entirely.
+
 ## Quick start
 
 ```yaml
@@ -21,6 +40,8 @@ Each volume produces its own `.tar.gz` archive. Files are stored at their origin
 services:
   stasher:
     image: stasher:latest
+    ports:
+      - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - backups:/backups
@@ -57,6 +78,7 @@ docker compose up -d
 | `CHECK_INTERVAL` | `60s` | How often to poll Docker for new or removed containers (Go duration, e.g. `30s`, `5m`). |
 | `LOG_LEVEL` | `info` | Minimum log severity: `error`, `warning`, `info`, `debug`. |
 | `TZ` | `UTC` | Timezone for cron schedule evaluation (e.g. `America/New_York`, `Europe/Paris`). Mounting `/etc/localtime` is not reliable on Windows/WSL — set this variable instead. |
+| `WEB_ADDR` | `:8080` | TCP address for the web dashboard. Set to an empty string to disable it. |
 
 ### Container labels
 

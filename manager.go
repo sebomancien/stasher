@@ -18,11 +18,18 @@ import (
 // labelEnabled is the Docker label filter used to discover opt-in containers.
 const labelEnabled = "stasher.enabled"
 
+type containerMeta struct {
+	name   string
+	image  string
+	config *label.Container
+}
+
 // Manager watches Docker for containers with backup labels and schedules backups
 type Manager struct {
 	docker *docker.Client
 	config *config.Config
 	jobs   map[string]map[string]*scheduler.Job // containerID → volID → job
+	meta   map[string]containerMeta             // containerID → decoded label state
 	mu     sync.Mutex
 }
 
@@ -35,6 +42,7 @@ func newManager(config *config.Config) (*Manager, error) {
 		docker: cli,
 		config: config,
 		jobs:   make(map[string]map[string]*scheduler.Job),
+		meta:   make(map[string]containerMeta),
 	}, nil
 }
 
@@ -84,6 +92,7 @@ func (m *Manager) sync(ctx context.Context) {
 			continue
 		}
 
+		m.meta[c.Id] = containerMeta{name: displayName(c.Names), image: c.Image, config: cb}
 		m.reconcileVolumes(c, displayName(c.Names), cb)
 	}
 
@@ -95,6 +104,7 @@ func (m *Manager) sync(ctx context.Context) {
 				j.Stop()
 			}
 			delete(m.jobs, id)
+			delete(m.meta, id)
 			slog.Info("container gone", "container", id[:12])
 		}
 	}

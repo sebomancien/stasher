@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"stasher/internal/config"
@@ -21,6 +22,18 @@ func main() {
 	if err != nil {
 		slog.Error("init", "err", err)
 		os.Exit(1)
+	}
+
+	if cfg.WebAddr != "" {
+		srv := &http.Server{Addr: cfg.WebAddr, Handler: http.HandlerFunc(mgr.dashboardHandler)}
+		go func() {
+			slog.Info("web dashboard", "addr", cfg.WebAddr)
+			err := srv.ListenAndServe()
+			if err != nil && err != http.ErrServerClosed {
+				slog.Error("web server", "err", err)
+			}
+		}()
+		defer srv.Shutdown(context.Background())
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

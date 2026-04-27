@@ -15,6 +15,8 @@ type Config struct {
 	CheckInterval time.Duration
 	// Controls the minimum severity of log messages emitted.
 	LogLevel slog.Level
+	// TCP address for the web dashboard (e.g. ":8080"). Empty disables it.
+	WebAddr string
 }
 
 // Loads the configuration from environment variables.
@@ -53,6 +55,12 @@ func Load() *Config {
 		case "debug", "verbose":
 			cfg.LogLevel = slog.LevelDebug
 		}
+	}
+
+	// Web dashboard address
+	cfg.WebAddr = ":8080"
+	if addr, ok := os.LookupEnv("WEB_ADDR"); ok {
+		cfg.WebAddr = addr
 	}
 
 	return &cfg
